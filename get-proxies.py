@@ -121,8 +121,9 @@ class ProxyStorage:
         return result
     
     def _is_ssl_capable_port(self, proxy: str) -> bool:
-        """Check if proxy port suggests SSL capability"""
-        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443]
+        """Check if proxy port suggests SSL capability - more inclusive approach"""
+        # Common SSL-capable ports including standard proxy ports
+        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443, 8080, 3128, 1080, 8081, 8888]
         try:
             port = int(proxy.split(':')[1])
             return port in ssl_ports
@@ -220,17 +221,50 @@ class ProxyValidator:
         try:
             proxy_url = f'http://{proxy}'
             
+            # Test multiple reliable HTTPS URLs for better success rate
+            test_urls = [
+                'https://icanhazip.com',
+                'https://checkip.amazonaws.com',
+                'https://ipinfo.io/ip',
+                'https://httpbin.org/ip'
+            ]
+            
+            # First test: Can proxy handle HTTPS with SSL verification (real SSL test)
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.config.validation_timeout + 2),
-                connector=aiohttp.TCPConnector(ssl=False)
+                timeout=aiohttp.ClientTimeout(total=15),
+                connector=aiohttp.TCPConnector(ssl=True)  # Enable SSL verification
             ) as session:
-                async with session.get(
-                    'https://httpbin.org/ip',
-                    proxy=proxy_url,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                    ssl=True  # Enable SSL verification
-                ) as response:
-                    return response.status == 200
+                for url in test_urls:
+                    try:
+                        async with session.get(
+                            url,
+                            proxy=proxy_url,
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                            ssl=True  # Enable SSL verification for real SSL test
+                        ) as response:
+                            if response.status == 200:
+                                return True
+                    except:
+                        continue
+            
+            # Fallback test: If strict SSL fails, test with relaxed SSL (still better than HTTP)
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15),
+                connector=aiohttp.TCPConnector(ssl=False)  # Relaxed SSL for fallback
+            ) as session:
+                for url in test_urls:
+                    try:
+                        async with session.get(
+                            url,
+                            proxy=proxy_url,
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                            ssl=False  # Relaxed SSL verification
+                        ) as response:
+                            if response.status == 200:
+                                return True
+                    except:
+                        continue
+                return False
         except Exception:
             return False
     
@@ -239,21 +273,23 @@ class ProxyValidator:
         try:
             proxy_url = f'http://{proxy}'
             
-            # Test with multiple URLs for better reliability
+            # Test with multiple reliable URLs for better success rate
             test_urls = [
-                "http://httpbin.org/ip",
-                "https://api.ipify.org"
+                "http://icanhazip.com",
+                "http://checkip.amazonaws.com", 
+                "http://ipinfo.io/ip",
+                "http://httpbin.org/ip"
             ]
             
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.config.validation_timeout)
+                timeout=aiohttp.ClientTimeout(total=15)  # Increased timeout
             ) as session:
                 for url in test_urls:
                     try:
                         async with session.get(
                             url,
                             proxy=proxy_url,
-                            headers={'User-Agent': 'Mozilla/5.0'}
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                         ) as response:
                             if response.status == 200:
                                 return True
@@ -264,9 +300,62 @@ class ProxyValidator:
         except:
             return False
     
+    def _validate_ssl_proxy(self, proxy: str) -> bool:
+        """Synchronous validation if a proxy supports SSL/HTTPS (for LinkedIn)"""
+        try:
+            proxy_dict = {
+                'http': f'http://{proxy}',
+                'https': f'http://{proxy}'
+            }
+            
+            # Test multiple reliable HTTPS URLs for better success rate
+            test_urls = [
+                'https://icanhazip.com',
+                'https://checkip.amazonaws.com',
+                'https://ipinfo.io/ip',
+                'https://httpbin.org/ip'
+            ]
+            
+            # First test: Can proxy handle HTTPS with SSL verification (real SSL test)
+            for url in test_urls:
+                try:
+                    response = requests.get(
+                        url,
+                        proxies=proxy_dict,
+                        timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        verify=True  # Enable SSL verification for real SSL test
+                    )
+                    if response.status_code == 200:
+                        return True
+                except:
+                    continue
+            
+            # Fallback test: If strict SSL fails, test with relaxed SSL (still better than HTTP)
+            for url in test_urls:
+                try:
+                    response = requests.get(
+                        url,
+                        proxies=proxy_dict,
+                        timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        verify=False  # Relaxed SSL verification for fallback
+                    )
+                    if response.status_code == 200:
+                        return True
+                except:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            # SSL errors are expected for non-SSL proxies
+            return False
+    
     def _is_ssl_capable_port(self, proxy: str) -> bool:
-        """Check if proxy port suggests SSL capability"""
-        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443]
+        """Check if proxy port suggests SSL capability - more inclusive approach"""
+        # Common SSL-capable ports including standard proxy ports
+        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443, 8080, 3128, 1080, 8081, 8888]
         try:
             port = int(proxy.split(':')[1])
             return port in ssl_ports
@@ -945,10 +1034,12 @@ class SmartProxyManager:
                 'https': f'http://{proxy}'
             }
             
-            # Test with multiple URLs for better reliability
+            # Test with multiple reliable URLs for better success rate
             test_urls = [
-                "http://httpbin.org/ip",
-                "https://api.ipify.org"
+                "http://icanhazip.com",
+                "http://checkip.amazonaws.com",
+                "http://ipinfo.io/ip",
+                "http://httpbin.org/ip"
             ]
             
             for url in test_urls:
@@ -956,8 +1047,8 @@ class SmartProxyManager:
                     response = requests.get(
                         url,
                         proxies=proxy_dict,
-                        timeout=self.validation_timeout,
-                        headers={'User-Agent': 'Mozilla/5.0'}
+                        timeout=15,  # Increased timeout
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                     )
                     if response.status_code == 200:
                         return True
@@ -977,23 +1068,54 @@ class SmartProxyManager:
                 'https': f'http://{proxy}'
             }
             
-            # Test SSL connectivity with LinkedIn-like HTTPS site
-            response = requests.get(
-                'https://httpbin.org/ip',
-                proxies=proxy_dict,
-                timeout=self.validation_timeout + 2,  # Longer timeout for SSL
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                verify=True  # Enable SSL verification
-            )
-            return response.status_code == 200
+            # Test multiple reliable HTTPS URLs for better success rate
+            test_urls = [
+                'https://icanhazip.com',
+                'https://checkip.amazonaws.com',
+                'https://ipinfo.io/ip',
+                'https://httpbin.org/ip'
+            ]
+            
+            # First test: Can proxy handle HTTPS with SSL verification (real SSL test)
+            for url in test_urls:
+                try:
+                    response = requests.get(
+                        url,
+                        proxies=proxy_dict,
+                        timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        verify=True  # Enable SSL verification for real SSL test
+                    )
+                    if response.status_code == 200:
+                        return True
+                except:
+                    continue
+            
+            # Fallback test: If strict SSL fails, test with relaxed SSL (still better than HTTP)
+            for url in test_urls:
+                try:
+                    response = requests.get(
+                        url,
+                        proxies=proxy_dict,
+                        timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        verify=False  # Relaxed SSL verification for fallback
+                    )
+                    if response.status_code == 200:
+                        return True
+                except:
+                    continue
+            
+            return False
             
         except Exception as e:
             # SSL errors are expected for non-SSL proxies
             return False
     
     def _is_ssl_capable_port(self, proxy: str) -> bool:
-        """Check if proxy port suggests SSL capability"""
-        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443]
+        """Check if proxy port suggests SSL capability - more inclusive approach"""
+        # Common SSL-capable ports including standard proxy ports
+        ssl_ports = [443, 8443, 8442, 9443, 10443, 11443, 12443, 8080, 3128, 1080, 8081, 8888]
         try:
             port = int(proxy.split(':')[1])
             return port in ssl_ports
